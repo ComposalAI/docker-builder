@@ -65,7 +65,12 @@ export async function setup(env = process.env, run = command) {
     if (!env.GITHUB_PATH) throw new Error('GITHUB_PATH is required');
     await appendFile(env.GITHUB_PATH, `${dirname(cli)}\n`);
   }
-  const cliEnv = { ...cleanEnv, VEX_API_TOKEN: token, VEX_API_BASE_URL: api.origin };
+  if (!env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is required');
+  // The CLI keys supervisors by config home as well as builder identity.
+  // A job must not reuse or disconnect a pre-existing local connection.
+  const configHome = join(env.RUNNER_TEMP, `com-builder-state-${randomUUID()}`);
+  await mkdir(configHome, { recursive: true, mode: 0o700 });
+  const cliEnv = { ...cleanEnv, XDG_CONFIG_HOME: configHome, VEX_API_TOKEN: token, VEX_API_BASE_URL: api.origin };
   const options = ['--org', org, '--api-base-url', api.origin, '--json'];
   // CI never creates a builder accidentally: members use an admin-provisioned cache.
   const resource = JSON.parse(await run(cli, ['docker-builder', 'status', builder, ...options], cliEnv)).docker_builder;
@@ -74,7 +79,7 @@ export async function setup(env = process.env, run = command) {
   }
   const context = `com-ci-${randomUUID()}`;
   // Register cleanup before setup, including malformed responses or failed wake.
-  for (const [name, value] of Object.entries({ context, cli, org: resource.organization_id, builder: resource.id, api: api.origin })) {
+  for (const [name, value] of Object.entries({ context, cli, config_home: configHome, org: resource.organization_id, builder: resource.id, api: api.origin })) {
     await record(env.GITHUB_STATE, name, value);
   }
   const result = JSON.parse(await run(cli, ['docker-builder', 'setup', resource.id, '--context', context,
@@ -83,7 +88,11 @@ export async function setup(env = process.env, run = command) {
       result.organization_id !== resource.organization_id || result.builder_id !== resource.id) {
     throw new Error('Composal CLI returned an unexpected builder connection');
   }
-  await run('docker', ['buildx', 'inspect', context, '--bootstrap'], cleanEnv, 300_000);
+  const dockerEnv = { ...cleanEnv, DOCKER_CONTEXT: context, BUILDX_BUILDER: context };
+  const version = await run('docker', ['--context', context, 'version', '--format', '{{.Server.Version}}'], dockerEnv, 300_000);
+  if (!/^\d+\.\d+\.\d+/.test(version.trim())) throw new Error('Remote Docker daemon is not ready');
+  // Inspect alone can exit zero with a node error; version must succeed first.
+  await run('docker', ['buildx', 'inspect', context, '--bootstrap'], dockerEnv, 300_000);
   if (use === 'true') {
     await record(env.GITHUB_STATE, 'selected', 'true');
     // The scoped gateway does not expose BuildKit content-record downloads.
@@ -113,7 +122,7 @@ export async function cleanup(env = process.env, run = command) {
   if (env.STATE_builder && env.STATE_org && env.STATE_cli && env.STATE_api) {
     try {
       await run(env.STATE_cli, ['docker-builder', 'disconnect', env.STATE_builder, '--org', env.STATE_org, '--api-base-url', env.STATE_api],
-        { ...cleanEnv, VEX_API_TOKEN: input(env, 'token'), VEX_API_BASE_URL: env.STATE_api });
+        { ...cleanEnv, XDG_CONFIG_HOME: env.STATE_config_home, VEX_API_TOKEN: input(env, 'token'), VEX_API_BASE_URL: env.STATE_api });
     } catch (error) { failures.push(error.message); }
   }
   try {

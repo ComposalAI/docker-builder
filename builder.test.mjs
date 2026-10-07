@@ -22,6 +22,7 @@ async function fixture(t, inputs = {}, failure = '') {
       return JSON.stringify({ context, buildx_builder: context, driver: 'docker', foreground: false,
         organization_id: 'org_123', builder_id: 'docker_builder_456' });
     }
+    if (args.includes('version')) return '28.5.2\n';
     return '';
   };
   const state = async () => {
@@ -38,12 +39,13 @@ async function fixture(t, inputs = {}, failure = '') {
 test('setup returns a ready explicit builder and selects it for subsequent steps without persisting its token', async t => {
   const f = await fixture(t);
   await setup(f.env, f.run);
-  assert.deepEqual(f.calls.map(c => c.args.slice(0, 2)), [['docker-builder', 'status'], ['docker-builder', 'setup'], ['buildx', 'inspect']]);
+  assert.deepEqual(f.calls.map(c => c.args.slice(0, 2)), [['docker-builder', 'status'], ['docker-builder', 'setup'], ['--context', f.calls[2].args[1]], ['buildx', 'inspect']]);
   for (const call of f.calls.slice(0, 2)) {
     assert.equal(call.env.VEX_API_TOKEN, f.env.INPUT_TOKEN);
     assert.ok(!call.args.join(' ').includes(f.env.INPUT_TOKEN));
   }
   assert.equal(f.calls[2].env.VEX_API_TOKEN, undefined);
+  assert.equal(f.calls[3].env.DOCKER_CONTEXT, f.calls[2].args[1]);
   const environment = await readFile(f.env.GITHUB_ENV, 'utf8');
   assert.ok(environment.includes('DOCKER_CONTEXT<<'));
   assert.ok(environment.includes('BUILDX_METADATA_PROVENANCE<<'));
@@ -57,6 +59,7 @@ test('setup returns a ready explicit builder and selects it for subsequent steps
   await cleanup({ ...f.env, ...state }, f.run);
   assert.deepEqual(f.calls.slice(-2).map(c => c.args.slice(0, 2)), [['docker-builder', 'disconnect'], ['context', 'rm']]);
   assert.ok(!f.calls.some(c => c.args.includes('sleep') || c.args.includes('recover')));
+  assert.equal(f.calls.at(-2).env.XDG_CONFIG_HOME, f.calls[0].env.XDG_CONFIG_HOME);
 });
 
 test('bootstrap failure retains cleanup state and emits no usable builder', async t => {
@@ -152,4 +155,28 @@ test('local invocation never prints a token-bearing GitHub masking command', asy
   const f = await fixture(t);
   await setup(f.env, f.run);
   assert.ok(output.every(message => !message.includes(f.env.INPUT_TOKEN)));
+});
+
+
+test('daemon failure refuses setup even when Buildx inspect would return success', async t => {
+  const f = await fixture(t, {}, 'version');
+  await assert.rejects(setup(f.env, f.run), /refused/);
+  await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
+  await cleanup({ ...f.env, ...await f.state() }, f.run);
+  assert.equal(f.calls.at(-2).args[1], 'disconnect');
+});
+
+test('empty daemon version cannot pass readiness', async t => {
+  const f = await fixture(t);
+  const run = (exe, args, env) => args.includes('version') ? '' : f.run(exe, args, env);
+  await assert.rejects(setup(f.env, run), /not ready/);
+});
+
+test('jobs sharing a builder have separate local supervisor identities', async t => {
+  const first = await fixture(t, { XDG_CONFIG_HOME: '/previous-config' });
+  const second = await fixture(t, { XDG_CONFIG_HOME: '/previous-config' });
+  await setup(first.env, first.run);
+  await setup(second.env, second.run);
+  assert.notEqual(first.calls[0].env.XDG_CONFIG_HOME, '/previous-config');
+  assert.notEqual(first.calls[0].env.XDG_CONFIG_HOME, second.calls[0].env.XDG_CONFIG_HOME);
 });
