@@ -1,0 +1,37 @@
+name: Composal Docker builder
+author: ComposalAI
+description: Connect Buildx to an existing Composal builder with a persistent remote Docker cache.
+branding:
+  icon: package
+  color: purple
+inputs:
+  token:
+    description: Composal API token for a member of the builder organization.
+    required: true
+  org:
+    description: Composal organization slug or public ID.
+    required: true
+  builder:
+    description: Existing organization builder slug or public ID.
+    default: main
+  use:
+    description: Select this context and Buildx builder for subsequent job steps. Set false for explicit outputs only.
+    default: 'true'
+  api-url:
+    description: Composal API origin.
+    default: https://composal.ai
+  install-cli:
+    description: Install the latest released Composal CLI in the runner temporary directory.
+    default: 'true'
+outputs:
+  builder:
+    description: Embedded Buildx builder. Pass to the build action's builder input and set DOCKER_CONTEXT to the context output.
+  context:
+    description: Docker context for explicit docker --context commands.
+  driver:
+    description: docker. Cache remains on the remote builder; omit external cache exporters.
+runs:
+  using: node24
+  main: index.mjs
+  post: post.mjs
+  post-if: always()
