@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanup, reportFailure, setup } from './builder.mjs';
+import { command, cleanup, reportFailure, setup } from './builder.mjs';
 
 async function fixture(t, inputs = {}, failure = '') {
   const directory = await mkdtemp(join(tmpdir(), 'com-builder-test-'));
@@ -16,7 +16,8 @@ async function fixture(t, inputs = {}, failure = '') {
   const run = async (executable, args, childEnv) => {
     calls.push({ executable, args, env: childEnv });
     if (args.includes(failure)) throw new Error(`refused ${env.INPUT_TOKEN}`);
-    if (args[1] === 'status') return JSON.stringify({ docker_builder: { id: 'docker_builder_456', organization_id: 'org_123' } });
+    if (args[0] === '--version') return 'com 1.17.88\n';
+    if (args[1] === 'status') return JSON.stringify({ docker_builder: { id: 'docker_builder_456', organization_id: 'org_123', status: 'ready' } });
     if (args[1] === 'setup') {
       const context = args[args.indexOf('--context') + 1];
       return JSON.stringify({ context, buildx_builder: context, driver: 'docker', foreground: false,
@@ -39,13 +40,14 @@ async function fixture(t, inputs = {}, failure = '') {
 test('setup returns a ready explicit builder and selects it for subsequent steps without persisting its token', async t => {
   const f = await fixture(t);
   await setup(f.env, f.run);
-  assert.deepEqual(f.calls.map(c => c.args.slice(0, 2)), [['docker-builder', 'status'], ['docker-builder', 'setup'], ['--context', f.calls[2].args[1]], ['buildx', 'inspect']]);
-  for (const call of f.calls.slice(0, 2)) {
+  assert.deepEqual(f.calls.map(c => c.args.slice(0, 2)), [['--version'], ['docker-builder', 'status'], ['docker-builder', 'setup'], ['--context', f.calls[3].args[1]], ['buildx', 'inspect']]);
+  for (const call of f.calls.slice(1, 3)) {
+    assert.equal(call.env.COMPOSAL_API_TOKEN, f.env.INPUT_TOKEN);
     assert.equal(call.env.VEX_API_TOKEN, f.env.INPUT_TOKEN);
     assert.ok(!call.args.join(' ').includes(f.env.INPUT_TOKEN));
   }
-  assert.equal(f.calls[2].env.VEX_API_TOKEN, undefined);
-  assert.equal(f.calls[3].env.DOCKER_CONTEXT, f.calls[2].args[1]);
+  assert.equal(f.calls[3].env.COMPOSAL_API_TOKEN, undefined);
+  assert.equal(f.calls[4].env.DOCKER_CONTEXT, f.calls[3].args[1]);
   const environment = await readFile(f.env.GITHUB_ENV, 'utf8');
   assert.ok(environment.includes('DOCKER_CONTEXT<<'));
   assert.ok(environment.includes('BUILDX_METADATA_PROVENANCE<<'));
@@ -59,7 +61,77 @@ test('setup returns a ready explicit builder and selects it for subsequent steps
   await cleanup({ ...f.env, ...state }, f.run);
   assert.deepEqual(f.calls.slice(-2).map(c => c.args.slice(0, 2)), [['docker-builder', 'disconnect'], ['context', 'rm']]);
   assert.ok(!f.calls.some(c => c.args.includes('sleep') || c.args.includes('recover')));
-  assert.equal(f.calls.at(-2).env.XDG_CONFIG_HOME, f.calls[0].env.XDG_CONFIG_HOME);
+  assert.equal(f.calls.at(-2).env.XDG_CONFIG_HOME, f.calls[1].env.XDG_CONFIG_HOME);
+});
+
+test('a cold builder reaches ready before any native Docker connection is configured', async t => {
+  const f = await fixture(t);
+  const states = ['sleeping', 'starting', 'ready'];
+  const waits = [];
+  let state;
+  const run = async (exe, args, env, timeout) => {
+    const result = await f.run(exe, args, env, timeout);
+    if (args[1] === 'status') {
+      state = states.shift();
+      return JSON.stringify({ docker_builder: { id: 'docker_builder_456', organization_id: 'org_123',
+        status: state, gateway_url: 'wss://builder.example/v1/organizations/org_123/docker' } });
+    }
+    if (args[1] === 'setup' || args.includes('version')) assert.equal(state, 'ready');
+    return result;
+  };
+  await setup(f.env, run, async ms => waits.push(ms));
+  assert.deepEqual(waits, [1_000, 1_000]);
+  assert.equal(f.calls.filter(c => c.args[1] === 'wake').length, 1);
+  const health = f.calls.findIndex(c => c.executable === 'curl');
+  const wake = f.calls.findIndex(c => c.args[1] === 'wake');
+  assert.ok(health < wake);
+  assert.ok(f.calls[health].args.includes('https://builder.example/healthz'));
+  assert.equal(f.calls[health].env.COMPOSAL_API_TOKEN, undefined);
+});
+
+test('an unreachable gateway does not wake compute or configure Docker', async t => {
+  const f = await fixture(t);
+  const run = async (exe, args, env, timeout) => {
+    if (exe === 'curl') throw new Error('gateway unavailable');
+    const result = await f.run(exe, args, env, timeout);
+    if (args[1] === 'status') return JSON.stringify({ docker_builder: {
+      id: 'docker_builder_456', organization_id: 'org_123', status: 'sleeping',
+      gateway_url: 'wss://builder.example/v1/organizations/org_123/docker',
+    } });
+    return result;
+  };
+  await assert.rejects(setup(f.env, run), /gateway unavailable/);
+  assert.ok(!f.calls.some(c => ['wake', 'setup'].includes(c.args[1])));
+});
+
+test('transient status failures are retried before configuring the native proxy', async t => {
+  const f = await fixture(t);
+  const waits = [];
+  let statuses = 0;
+  const run = async (exe, args, env, timeout) => {
+    if (args[1] === 'status' && statuses++ === 0) throw new Error('500 Internal Server Error');
+    return f.run(exe, args, env, timeout);
+  };
+  await setup(f.env, run, async ms => waits.push(ms));
+  assert.equal(statuses, 2);
+  assert.deepEqual(waits, [250]);
+});
+
+test('a stalled control-plane wake has one bounded deadline and publishes no context', async t => {
+  const f = await fixture(t);
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const run = async (exe, args, env, timeout) => {
+    const result = await f.run(exe, args, env, timeout);
+    if (args[1] === 'status') return JSON.stringify({ docker_builder: {
+      id: 'docker_builder_456', organization_id: 'org_123', status: 'starting',
+      gateway_url: 'wss://builder.example/v1/organizations/org_123/docker',
+    } });
+    return result;
+  };
+  await assert.rejects(setup(f.env, run, async () => { now = 900_001; }), /wake timed out after 900s/);
+  assert.ok(!f.calls.some(c => c.args[1] === 'setup'));
+  await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
 });
 
 test('bootstrap failure retains cleanup state and emits no usable builder', async t => {
@@ -73,13 +145,14 @@ test('bootstrap failure retains cleanup state and emits no usable builder', asyn
 test('missing builder fails before setup; CI cannot silently create a misspelled cache', async t => {
   const f = await fixture(t, {}, 'status');
   await assert.rejects(setup(f.env, f.run), /refused/);
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 2);
 });
 
 test('installer cannot inherit the API token and the installed CLI is retained for post cleanup', async t => {
-  const f = await fixture(t, { 'INPUT_INSTALL-CLI': 'true', VEX_API_TOKEN: 'unrelated-token' });
+  const f = await fixture(t, { 'INPUT_INSTALL-CLI': 'true', COMPOSAL_API_TOKEN: 'unrelated-token', VEX_API_TOKEN: 'legacy-unrelated-token' });
   await setup(f.env, f.run);
   for (const call of f.calls.slice(0, 2)) {
+    assert.equal(call.env.COMPOSAL_API_TOKEN, undefined);
     assert.equal(call.env.VEX_API_TOKEN, undefined);
     assert.equal(call.env.INPUT_TOKEN, undefined);
   }
@@ -177,6 +250,113 @@ test('jobs sharing a builder have separate local supervisor identities', async t
   const second = await fixture(t, { XDG_CONFIG_HOME: '/previous-config' });
   await setup(first.env, first.run);
   await setup(second.env, second.run);
-  assert.notEqual(first.calls[0].env.XDG_CONFIG_HOME, '/previous-config');
-  assert.notEqual(first.calls[0].env.XDG_CONFIG_HOME, second.calls[0].env.XDG_CONFIG_HOME);
+  assert.notEqual(first.calls[1].env.XDG_CONFIG_HOME, '/previous-config');
+  assert.notEqual(first.calls[1].env.XDG_CONFIG_HOME, second.calls[1].env.XDG_CONFIG_HOME);
+});
+
+
+test('fresh proxy connection resets are retried before publishing a ready context', async t => {
+  const f = await fixture(t);
+  let probes = 0;
+  const waits = [];
+  const run = (exe, args, env, timeout) => {
+    if (args.includes('version') && ++probes < 3) throw new Error('read unix: connection reset by peer');
+    return f.run(exe, args, env, timeout);
+  };
+  await setup(f.env, run, async ms => waits.push(ms));
+  assert.equal(probes, 3);
+  assert.deepEqual(waits, [2000, 2000]);
+  assert.ok((await readFile(f.env.GITHUB_OUTPUT, 'utf8')).includes('driver<<'));
+});
+
+test('persistent proxy failure exhausts bounded readiness probes without usable outputs', async t => {
+  const f = await fixture(t);
+  let probes = 0;
+  const waits = [];
+  const run = (exe, args, env, timeout) => {
+    if (args.includes('version')) { probes++; throw new Error('connection reset by peer'); }
+    return f.run(exe, args, env, timeout);
+  };
+  await assert.rejects(setup(f.env, run, async ms => waits.push(ms)), /connection reset/);
+  assert.equal(probes, 5);
+  assert.deepEqual(waits, [2000, 2000, 2000, 2000]);
+  await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
+  await cleanup({ ...f.env, ...await f.state() }, f.run);
+});
+
+test('authorization failures are not retried as proxy startup races', async t => {
+  const f = await fixture(t);
+  let probes = 0;
+  const waits = [];
+  const run = (exe, args, env, timeout) => {
+    if (args.includes('version')) { probes++; throw new Error('unauthorized'); }
+    return f.run(exe, args, env, timeout);
+  };
+  await assert.rejects(setup(f.env, run, async ms => waits.push(ms)), /unauthorized/);
+  assert.equal(probes, 1);
+  assert.deepEqual(waits, []);
+});
+
+test('a stalled native connection uses one readiness budget and cannot restart that budget on failure', async t => {
+  const f = await fixture(t);
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const timeouts = [];
+  const waits = [];
+  const run = (exe, args, env, timeout) => {
+    if (args.includes('version')) {
+      timeouts.push(timeout);
+      now = 300_001;
+      throw new Error('connection reset by peer');
+    }
+    return f.run(exe, args, env, timeout);
+  };
+  await assert.rejects(setup(f.env, run, async ms => waits.push(ms)), /connection reset/);
+  assert.deepEqual(timeouts, [15_000]);
+  assert.deepEqual(waits, []);
+  await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
+});
+
+
+test('a long shared wake completes before opening short-lived Docker probes', async t => {
+  const f = await fixture(t);
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const run = async (exe, args, env, timeout) => {
+    const result = await f.run(exe, args, env, timeout);
+    if (args[1] === 'status') return JSON.stringify({ docker_builder: {
+      id: 'docker_builder_456', organization_id: 'org_123', status: now < 760_000 ? 'starting' : 'ready',
+      gateway_url: 'wss://builder.example/v1/organizations/org_123/docker',
+    } });
+    if (args.includes('version')) {
+      assert.equal(now, 760_000);
+      assert.equal(timeout, 15_000);
+    }
+    return result;
+  };
+  await setup(f.env, run, async () => { now = 760_000; });
+  assert.ok((await readFile(f.env.GITHUB_OUTPUT, 'utf8')).includes('driver<<'));
+});
+
+test('native probe timeouts are retried without repeating setup or a build', async t => {
+  const f = await fixture(t);
+  let probes = 0;
+  const run = (exe, args, env, timeout) => {
+    if (args.includes('version') && probes++ === 0) throw new Error('timed out after 15s');
+    return f.run(exe, args, env, timeout);
+  };
+  await setup(f.env, run, async () => {});
+  assert.equal(probes, 2);
+  assert.equal(f.calls.filter(c => c.args[1] === 'setup').length, 1);
+});
+
+test('command failures preserve timeout and signal details without stdout or environment', async () => {
+  await assert.rejects(command(process.execPath, ['-e', "console.log('private-stdout'); setInterval(() => {}, 1000)"],
+    { PRIVATE_TOKEN: 'private-env' }, 100), error => {
+    assert.match(error.message, /timed out after 0.1s/);
+    assert.match(error.message, /signal=SIGTERM, killed=true/);
+    assert.ok(!error.message.includes('private-stdout'));
+    assert.ok(!error.message.includes('private-env'));
+    return true;
+  });
 });
