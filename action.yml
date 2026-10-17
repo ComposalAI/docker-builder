@@ -14,6 +14,9 @@ inputs:
   builder:
     description: Existing organization builder slug or public ID.
     default: main
+  wake-timeout:
+    description: Maximum seconds to wait for the shared builder to become ready, before connecting Docker.
+    default: '900'
   use:
     description: Select this context and Buildx builder for subsequent job steps. Set false for explicit outputs only.
     default: 'true'
