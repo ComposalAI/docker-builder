@@ -123,10 +123,12 @@ export async function setup(env = process.env, run = command, wait = delay) {
     const deadline = Date.now() + wakeTimeout * 1_000;
     let nextProgress = Date.now() + 15_000;
     let current = resource;
+    let requestedWake = false;
     while (current.status !== 'ready') {
       if (Date.now() >= deadline) throw new Error(`Remote builder wake timed out after ${wakeTimeout}s (state=${current.status}, generation=${current.generation ?? 'unknown'}); the shared wake continues independently of this job`);
-      if (current.status === 'sleeping') {
+      if (current.status === 'sleeping' || (current.status === 'starting' && !requestedWake)) {
         await run(cli, ['docker-builder', 'wake', resource.id, ...options], cliEnv, Math.max(1, deadline - Date.now()));
+        requestedWake = true;
       } else if (!['starting', 'stopping'].includes(current.status)) {
         throw new Error('Composal CLI returned an unexpected builder state');
       }

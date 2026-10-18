@@ -89,6 +89,24 @@ test('a cold builder reaches ready before any native Docker connection is config
   assert.equal(f.calls[health].env.COMPOSAL_API_TOKEN, undefined);
 });
 
+test('an already starting builder requests one wake retry instead of only polling abandoned state', async t => {
+  const f = await fixture(t);
+  let statuses = 0;
+  const run = async (exe, args, env, timeout) => {
+    const result = await f.run(exe, args, env, timeout);
+    if (args[1] === 'status') return JSON.stringify({ docker_builder: {
+      id: 'docker_builder_456', organization_id: 'org_123', generation: 37,
+      status: ++statuses < 4 ? 'starting' : 'ready',
+      gateway_url: 'wss://builder.example/v1/organizations/org_123/docker',
+    } });
+    if (args[1] === 'setup') assert.equal(statuses, 4);
+    return result;
+  };
+  await setup(f.env, run, async () => {});
+  assert.equal(f.calls.filter(c => c.args[1] === 'wake').length, 1);
+  assert.equal(f.calls.find(c => c.args[1] === 'wake').args[2], 'docker_builder_456');
+});
+
 test('an unreachable gateway does not wake compute or configure Docker', async t => {
   const f = await fixture(t);
   const run = async (exe, args, env, timeout) => {
