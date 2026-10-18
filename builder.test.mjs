@@ -122,6 +122,38 @@ test('an unreachable gateway does not wake compute or configure Docker', async t
   assert.ok(!f.calls.some(c => ['wake', 'setup'].includes(c.args[1])));
 });
 
+test('a failed startup stops polling immediately and reports its generation and stage', async t => {
+  const f = await fixture(t);
+  let statuses = 0;
+  const run = async (exe, args, env, timeout) => {
+    const result = await f.run(exe, args, env, timeout);
+    if (args[1] === 'status') return JSON.stringify({ docker_builder: {
+      id: 'docker_builder_456', organization_id: 'org_123', generation: 39,
+      status: ++statuses === 1 ? 'starting' : 'failed', startup_stage: 'runtime_create',
+      startup_failure: 'allocation timed out', gateway_url: 'wss://builder.example/v1/organizations/org_123/docker',
+    } });
+    return result;
+  };
+  await assert.rejects(setup(f.env, run, async () => {}), /startup failed.*generation=39.*runtime_create.*allocation timed out/);
+  assert.equal(statuses, 2);
+  assert.ok(!f.calls.some(c => c.args[1] === 'setup'));
+});
+
+test('a fresh job can explicitly retry a failed startup once using the same builder', async t => {
+  const f = await fixture(t);
+  let statuses = 0;
+  const run = async (exe, args, env, timeout) => {
+    const result = await f.run(exe, args, env, timeout);
+    if (args[1] === 'status') return JSON.stringify({ docker_builder: {
+      id: 'docker_builder_456', organization_id: 'org_123', generation: 39,
+      status: ++statuses === 1 ? 'failed' : 'ready', gateway_url: 'wss://builder.example/v1/organizations/org_123/docker',
+    } });
+    return result;
+  };
+  await setup(f.env, run, async () => {});
+  assert.equal(f.calls.filter(c => c.args[1] === 'wake').length, 1);
+});
+
 test('transient status failures are retried before configuring the native proxy', async t => {
   const f = await fixture(t);
   const waits = [];

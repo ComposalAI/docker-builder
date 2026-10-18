@@ -125,15 +125,18 @@ export async function setup(env = process.env, run = command, wait = delay) {
     let current = resource;
     let requestedWake = false;
     while (current.status !== 'ready') {
+      if (current.status === 'failed' && requestedWake) {
+        throw new Error(`Remote builder startup failed (generation=${current.generation ?? 'unknown'}, stage=${current.startup_stage || 'unknown'}): ${current.startup_failure || 'startup did not complete; retry the job to resume the same cache'}`);
+      }
       if (Date.now() >= deadline) throw new Error(`Remote builder wake timed out after ${wakeTimeout}s (state=${current.status}, generation=${current.generation ?? 'unknown'}); the shared wake continues independently of this job`);
-      if (current.status === 'sleeping' || (current.status === 'starting' && !requestedWake)) {
+      if (current.status === 'sleeping' || (['starting', 'failed'].includes(current.status) && !requestedWake)) {
         await run(cli, ['docker-builder', 'wake', resource.id, ...options], cliEnv, Math.max(1, deadline - Date.now()));
         requestedWake = true;
       } else if (!['starting', 'stopping'].includes(current.status)) {
         throw new Error('Composal CLI returned an unexpected builder state');
       }
       if (Date.now() >= nextProgress) {
-        stage(`Waiting for builder: state=${current.status}, generation=${current.generation ?? 'unknown'}`);
+        stage(`Waiting for builder: state=${current.status}, generation=${current.generation ?? 'unknown'}, stage=${current.startup_stage || 'unknown'}`);
         nextProgress = Date.now() + 15_000;
       }
       await wait(Math.min(1_000, Math.max(1, deadline - Date.now())));
