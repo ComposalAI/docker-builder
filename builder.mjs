@@ -195,8 +195,9 @@ export async function setup(env = process.env, run = command, wait = delay) {
     }
   }
   stage('Remote Docker ready');
-  // Inspect alone can exit zero with a node error; version must succeed first.
-  await run('docker', ['buildx', 'inspect', context, '--bootstrap'], dockerEnv, 300_000);
+  // CLI setup already verifies the local Buildx plugin and implicit Docker
+  // driver. The build discovers BuildKit itself; repeating discovery here adds
+  // remote round trips without making the first build faster.
   if (use === 'true') {
     await record(env.GITHUB_STATE, 'selected', 'true');
     // The scoped gateway does not expose BuildKit content-record downloads.

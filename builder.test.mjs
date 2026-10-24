@@ -43,14 +43,14 @@ async function fixture(t, inputs = {}, failure = '') {
 test('setup returns a ready explicit builder and selects it for subsequent steps without persisting its token', async t => {
   const f = await fixture(t);
   await setup(f.env, f.run);
-  assert.deepEqual(f.calls.map(c => c.args.slice(0, 2)), [['--version'], ['docker-builder', 'status'], ['docker-builder', 'setup'], ['--context', f.calls[3].args[1]], ['buildx', 'inspect']]);
+  assert.deepEqual(f.calls.map(c => c.args.slice(0, 2)), [['--version'], ['docker-builder', 'status'], ['docker-builder', 'setup'], ['--context', f.calls[3].args[1]]]);
   for (const call of f.calls.slice(1, 3)) {
     assert.equal(call.env.COMPOSAL_API_TOKEN, f.env.INPUT_TOKEN);
     assert.equal(call.env.VEX_API_TOKEN, f.env.INPUT_TOKEN);
     assert.ok(!call.args.join(' ').includes(f.env.INPUT_TOKEN));
   }
   assert.equal(f.calls[3].env.COMPOSAL_API_TOKEN, undefined);
-  assert.equal(f.calls[4].env.DOCKER_CONTEXT, f.calls[3].args[1]);
+  assert.equal(f.calls[3].env.DOCKER_CONTEXT, f.calls[3].args[1]);
   const environment = await readFile(f.env.GITHUB_ENV, 'utf8');
   assert.ok(environment.includes('DOCKER_CONTEXT<<'));
   assert.ok(environment.includes('BUILDX_METADATA_PROVENANCE<<'));
@@ -187,14 +187,6 @@ test('a stalled control-plane wake has one bounded deadline and publishes no con
   await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
 });
 
-test('bootstrap failure retains cleanup state and emits no usable builder', async t => {
-  const f = await fixture(t, {}, '--bootstrap');
-  await assert.rejects(setup(f.env, f.run), /refused/);
-  await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
-  await cleanup({ ...f.env, ...await f.state() }, f.run);
-  assert.equal(f.calls.at(-2).args[1], 'disconnect');
-});
-
 test('missing builder fails before setup; CI cannot silently create a misspelled cache', async t => {
   const f = await fixture(t, {}, 'status');
   await assert.rejects(setup(f.env, f.run), /refused/);
@@ -253,6 +245,20 @@ test('malformed setup response still disconnects the resolved builder without em
 });
 
 
+test('a non-Docker driver is refused before publishing outputs and remains cleanable', async t => {
+  const f = await fixture(t);
+  const run = async (executable, args, env) => {
+    const result = await f.run(executable, args, env);
+    return args[1] === 'setup' ? JSON.stringify({ ...JSON.parse(result), driver: 'docker-container' }) : result;
+  };
+  await assert.rejects(setup(f.env, run), /unexpected builder connection/);
+  await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
+  await cleanup({ ...f.env, ...await f.state() }, f.run);
+  assert.equal(f.calls.at(-2).args[1], 'disconnect');
+  assert.equal(f.calls.at(-1).args[1], 'rm');
+});
+
+
 test('explicit-output mode leaves Docker environment untouched', async t => {
   const f = await fixture(t, { INPUT_USE: 'false' });
   await setup(f.env, f.run);
@@ -284,7 +290,7 @@ test('local invocation never prints a token-bearing GitHub masking command', asy
 });
 
 
-test('daemon failure refuses setup even when Buildx inspect would return success', async t => {
+test('daemon failure retains cleanup state and refuses to publish a usable builder', async t => {
   const f = await fixture(t, {}, 'version');
   await assert.rejects(setup(f.env, f.run), /refused/);
   await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
