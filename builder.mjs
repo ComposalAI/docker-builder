@@ -46,7 +46,7 @@ export async function setup(env = process.env, run = command, wait = delay) {
   if (!token) throw new Error('token is required');
   if (env.GITHUB_ACTIONS === 'true') console.log(`::add-mask::${escapeCommand(token)}`);
   const org = input(env, 'org');
-  const builder = input(env, 'builder', 'main');
+  const builder = input(env, 'builder', 'main-gen2');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(org)) throw new Error('org is required and must be a slug or public ID');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(builder)) throw new Error('builder must be a slug or public ID');
   const api = new URL(input(env, 'api-url', 'https://composal.ai'));
@@ -106,6 +106,22 @@ export async function setup(env = process.env, run = command, wait = delay) {
   const resource = await inspect(builder);
   if (!/^org_[a-zA-Z0-9]+$/.test(resource?.organization_id) || !/^docker_builder_[a-zA-Z0-9]+$/.test(resource?.id)) {
     throw new Error('Composal CLI returned an unexpected builder identity');
+  }
+  // Read the new backend field directly until all released CLIs retain it.
+  // Fail closed: a v2 action must never quietly build on Classic or locally.
+  let backend;
+  try {
+    const response = await fetch(`${api.origin}/api/v1/organizations/${resource.organization_id}/docker_builders/${resource.id}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      redirect: 'error', signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error('backend lookup refused');
+    backend = (await response.json()).docker_builder;
+  } catch {
+    throw new Error('Could not verify Gen2 builder placement');
+  }
+  if (backend?.id !== resource.id || backend.organization_id !== resource.organization_id || backend.backend !== 'gen2') {
+    throw new Error('docker-builder@2 requires an enabled Gen2 builder; select its builder name');
   }
   stage(`Builder resolved: ${resource.status || 'unknown state'}`);
   if (resource.status !== 'ready') {
