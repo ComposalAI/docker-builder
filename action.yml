@@ -1,6 +1,6 @@
 name: Composal Docker builder
 author: ComposalAI
-description: Connect Buildx to an existing Composal builder with a persistent remote Docker cache.
+description: Connect Buildx to an existing Composal builder with a persistent EBS cache on the AWS Gen2 fleet.
 branding:
   icon: package
   color: purple
@@ -13,7 +13,7 @@ inputs:
     required: true
   builder:
     description: Existing organization builder slug or public ID.
-    default: main
+    default: main-gen2
   wake-timeout:
     description: Maximum seconds to wait for the shared builder to become ready, before connecting Docker.
     default: '900'

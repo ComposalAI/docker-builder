@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { command, cleanup, reportFailure, setup } from './builder.mjs';
 
 async function fixture(t, inputs = {}, failure = '') {
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ docker_builder: {
+    id: 'docker_builder_456', organization_id: 'org_123', backend: 'gen2',
+  } }) }));
   const directory = await mkdtemp(join(tmpdir(), 'com-builder-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const env = {
@@ -409,4 +412,14 @@ test('command failures preserve timeout and signal details without stdout or env
     assert.ok(!error.message.includes('private-env'));
     return true;
   });
+});
+
+
+test('v2 refuses a Classic builder before waking or connecting Docker', async t => {
+  const f = await fixture(t);
+  t.mock.method(globalThis, 'fetch', async () => ({ok: true, json: async () => ({docker_builder: {
+    id: 'docker_builder_456', organization_id: 'org_123', backend: 'classic',
+  }})}));
+  await assert.rejects(setup(f.env, f.run), /requires an enabled Gen2 builder/);
+  assert.ok(!f.calls.some(c => c.args[1] === 'wake' || c.args[1] === 'setup'));
 });
