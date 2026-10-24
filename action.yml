@@ -24,8 +24,8 @@ inputs:
     description: Composal API origin.
     default: https://composal.ai
   install-cli:
-    description: Install the latest released Composal CLI in the runner temporary directory.
-    default: 'true'
+    description: 'auto reuses a compatible installed CLI, otherwise installs privately; true always installs; false requires an installed CLI.'
+    default: 'auto'
 outputs:
   builder:
     description: Embedded Buildx builder. Pass to the build action's builder input and set DOCKER_CONTEXT to the context output.

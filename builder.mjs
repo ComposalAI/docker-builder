@@ -6,6 +6,18 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const exec = promisify(execFile);
+const minimumCliVersion = [1, 17, 92];
+
+function compatibleCli(version) {
+  const match = /^com(?:posal)? (\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!match) return false;
+  const parts = match.slice(1).map(Number);
+  // A future major release needs an explicit compatibility review.
+  return parts[0] === minimumCliVersion[0] &&
+    (parts[1] > minimumCliVersion[1] ||
+      (parts[1] === minimumCliVersion[1] && parts[2] >= minimumCliVersion[2]));
+}
+
 const selectedKeys = ['DOCKER_CONTEXT', 'BUILDX_BUILDER', 'BUILDX_METADATA_PROVENANCE', 'DOCKER_BUILD_RECORD_UPLOAD', 'DOCKER_BUILD_SUMMARY'];
 const escapeCommand = value => String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
 
@@ -61,15 +73,24 @@ export async function setup(env = process.env, run = command, wait = delay) {
     console.log(`${name} (${((now - stageStartedAt) / 1000).toFixed(1)}s; total ${((now - startedAt) / 1000).toFixed(1)}s)`);
     stageStartedAt = now;
   };
-  const install = input(env, 'install-cli', 'true');
-  if (!['true', 'false'].includes(install)) throw new Error('install-cli must be true or false');
+  const install = input(env, 'install-cli', 'auto');
+  if (!['auto', 'true', 'false'].includes(install)) throw new Error('install-cli must be auto, true or false');
   const wakeTimeout = Number(input(env, 'wake-timeout', '900'));
   if (!Number.isInteger(wakeTimeout) || wakeTimeout < 30 || wakeTimeout > 3600) throw new Error('wake-timeout must be between 30 and 3600 seconds');
   const use = input(env, 'use', 'true');
   if (!['true', 'false'].includes(use)) throw new Error('use must be true or false');
   const cleanEnv = withoutToken(env);
   let cli = 'com';
-  if (install === 'true') {
+  let cliVersion;
+  if (install === 'auto') {
+    try {
+      cliVersion = (await run(cli, ['--version'], cleanEnv, 10_000)).trim();
+    } catch {
+      // Missing or unusable installations use a job-private released CLI.
+    }
+  }
+  const reuse = install === 'auto' && compatibleCli(cliVersion);
+  if (install === 'true' || (install === 'auto' && !reuse)) {
     if (!env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is required');
     const directory = join(env.RUNNER_TEMP, `com-docker-builder-${randomUUID()}`);
     await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -80,9 +101,9 @@ export async function setup(env = process.env, run = command, wait = delay) {
     if (!env.GITHUB_PATH) throw new Error('GITHUB_PATH is required');
     await appendFile(env.GITHUB_PATH, `${dirname(cli)}\n`);
   }
-  const cliVersion = (await run(cli, ['--version'], cleanEnv, 10_000)).trim();
-  if (!/^com(?:posal)? [0-9]+\.[0-9]+\.[0-9]+/.test(cliVersion)) throw new Error('Could not identify the Composal CLI version');
-  stage(`Composal CLI available: ${cliVersion}`);
+  if (!reuse) cliVersion = (await run(cli, ['--version'], cleanEnv, 10_000)).trim();
+  if (!compatibleCli(cliVersion)) throw new Error('Composal CLI 1.17.92 or newer in major version 1 is required');
+  stage(`Composal CLI available: ${cliVersion}${reuse ? ' (preinstalled)' : ''}`);
   if (!env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is required');
   // The CLI keys supervisors by config home as well as builder identity.
   // A job must not reuse or disconnect a pre-existing local connection.

@@ -19,7 +19,7 @@ async function fixture(t, inputs = {}, failure = '') {
   const run = async (executable, args, childEnv) => {
     calls.push({ executable, args, env: childEnv });
     if (args.includes(failure)) throw new Error(`refused ${env.INPUT_TOKEN}`);
-    if (args[0] === '--version') return 'com 1.17.88\n';
+    if (args[0] === '--version') return 'com 1.17.92\n';
     if (args[1] === 'status') return JSON.stringify({ docker_builder: { id: 'docker_builder_456', organization_id: 'org_123', status: 'ready' } });
     if (args[1] === 'setup') {
       const context = args[args.indexOf('--context') + 1];
@@ -428,4 +428,43 @@ test('v2 refuses a Classic builder before waking or connecting Docker', async t 
   }})}));
   await assert.rejects(setup(f.env, f.run), /requires an enabled Gen2 builder/);
   assert.ok(!f.calls.some(c => c.args[1] === 'wake' || c.args[1] === 'setup'));
+});
+
+for (const version of ['com 1.17.92', 'com 1.18.0']) {
+  test(`automatic setup reuses compatible installed ${version} without downloading`, async t => {
+    const f = await fixture(t, { 'INPUT_INSTALL-CLI': '' });
+    const run = (exe, args, env) => args[0] === '--version' ? version : f.run(exe, args, env);
+    await setup(f.env, run);
+    assert.equal((await f.state()).STATE_cli, 'com');
+    assert.ok(!f.calls.some(c => c.executable === 'curl' || c.executable === 'sh'));
+    await cleanup({ ...f.env, ...await f.state() }, f.run);
+    assert.equal(f.calls.at(-2).executable, 'com');
+  });
+}
+
+for (const version of [null, 'com 1.17.91', 'com 2.0.0', 'com 1.17.92-dev', 'other 1.17.92']) {
+  test(`automatic setup installs a private CLI when installed version is ${version}`, async t => {
+    const f = await fixture(t, { 'INPUT_INSTALL-CLI': 'auto', COMPOSAL_API_TOKEN: 'ambient', VEX_API_TOKEN: 'ambient' });
+    const run = async (exe, args, env) => {
+      if (exe === 'com' && args[0] === '--version') {
+        assert.equal(env.INPUT_TOKEN, undefined);
+        assert.equal(env.COMPOSAL_API_TOKEN, undefined);
+        assert.equal(env.VEX_API_TOKEN, undefined);
+        if (version === null) throw new Error('ENOENT');
+        return version;
+      }
+      return f.run(exe, args, env);
+    };
+    await setup(f.env, run);
+    assert.match((await f.state()).STATE_cli, /com-docker-builder-.*\/com$/);
+    assert.equal(f.calls.filter(c => c.executable === 'curl').length, 1);
+    assert.equal(f.calls.filter(c => c.executable === 'sh').length, 1);
+  });
+}
+
+test('explicit preinstalled mode rejects an unsupported CLI without installing', async t => {
+  const f = await fixture(t);
+  const run = (exe, args, env) => args[0] === '--version' ? 'com 1.17.91' : f.run(exe, args, env);
+  await assert.rejects(setup(f.env, run), /1.17.92 or newer/);
+  assert.equal(f.calls.length, 0);
 });
