@@ -61,7 +61,7 @@ export async function setup(env = process.env, run = command, wait = delay) {
   const builder = input(env, 'builder', 'main-gen2');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(org)) throw new Error('org is required and must be a slug or public ID');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(builder)) throw new Error('builder must be a slug or public ID');
-  const api = new URL(input(env, 'api-url', 'https://composal.ai'));
+  const api = new URL(input(env, 'api-url', 'https://composal.com'));
   if (api.protocol !== 'https:' || api.username || api.password || api.pathname !== '/' || api.search || api.hash) {
     throw new Error('api-url must be an HTTPS origin');
   }
@@ -95,8 +95,10 @@ export async function setup(env = process.env, run = command, wait = delay) {
     const directory = join(env.RUNNER_TEMP, `com-docker-builder-${randomUUID()}`);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const script = join(directory, 'install.sh');
-    await run('curl', ['-fsSL', '--max-time', '60', 'https://dl.composal.ai/install.sh', '-o', script], cleanEnv);
-    await run('sh', [script], { ...cleanEnv, VEX_INSTALL_DIR: directory }, 300_000);
+    const downloadOrigin = ['https://composal.ai', 'https://vex.sc', 'https://api.vex.sc'].includes(api.origin)
+      ? 'https://dl.composal.ai' : 'https://dl.composal.com';
+    await run('curl', ['-fsSL', '--max-time', '60', `${downloadOrigin}/install.sh`, '-o', script], cleanEnv);
+    await run('sh', [script], { ...cleanEnv, VEX_INSTALL_DIR: directory, VEX_API_BASE_URL: api.origin }, 300_000);
     cli = join(directory, 'com');
     if (!env.GITHUB_PATH) throw new Error('GITHUB_PATH is required');
     await appendFile(env.GITHUB_PATH, `${dirname(cli)}\n`);
