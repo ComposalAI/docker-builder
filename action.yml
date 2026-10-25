@@ -22,7 +22,7 @@ inputs:
     default: 'true'
   api-url:
     description: Composal API origin.
-    default: https://composal.ai
+    default: https://composal.com
   install-cli:
     description: 'auto reuses a compatible installed CLI, otherwise installs privately; true always installs; false requires an installed CLI.'
     default: 'auto'

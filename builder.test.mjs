@@ -468,3 +468,19 @@ test('explicit preinstalled mode rejects an unsupported CLI without installing',
   await assert.rejects(setup(f.env, run), /1.17.92 or newer/);
   assert.equal(f.calls.length, 0);
 });
+
+
+test('installation and CLI calls follow the selected hosted API', async t => {
+  for (const [api, cdn] of [
+    ['https://composal.com', 'https://dl.composal.com'],
+    ['https://composal.ai', 'https://dl.composal.ai'],
+    ['https://private.example', 'https://dl.composal.com'],
+  ]) {
+    const f = await fixture(t, { 'INPUT_INSTALL-CLI': 'true', 'INPUT_API-URL': api });
+    await setup(f.env, f.run);
+    const download = f.calls.find(c => c.executable === 'curl');
+    assert.ok(download.args.includes(`${cdn}/install.sh`));
+    assert.equal(f.calls.find(c => c.executable === 'sh').env.VEX_API_BASE_URL, api);
+    assert.equal(f.calls.find(c => c.args[1] === 'status').env.VEX_API_BASE_URL, api);
+  }
+});
