@@ -484,3 +484,21 @@ test('installation and CLI calls follow the selected hosted API', async t => {
     assert.equal(f.calls.find(c => c.args[1] === 'status').env.VEX_API_BASE_URL, api);
   }
 });
+
+test('deadline kills remain retryable when the child shuts down with SIGPIPE', { skip: process.platform === 'win32' }, async () => {
+  await assert.rejects(command('/bin/sh', ['-c',
+    "trap 'kill -PIPE $$' TERM; while :; do sleep 0.05; done"],
+  {}, 300), error => {
+    assert.match(error.message, /timed out after 0.3s/);
+    assert.match(error.message, /signal=SIGPIPE, killed=true/);
+    return true;
+  });
+});
+
+test('a child exiting on SIGPIPE without a deadline kill is not reported as a timeout', { skip: process.platform === 'win32' }, async () => {
+  await assert.rejects(command('/bin/sh', ['-c', 'kill -PIPE $$'], {}), error => {
+    assert.match(error.message, /command failed/);
+    assert.doesNotMatch(error.message, /timed out/);
+    return true;
+  });
+});
