@@ -37,7 +37,8 @@ export async function command(executable, args, env, timeout = 120_000) {
     return stdout;
   } catch (error) {
     // Never include argv, environment, or stdout (which may contain credentials).
-    const timedOut = error.killed && error.signal === 'SIGTERM' && error.code == null;
+    // A deadline kill can finish with SIGPIPE while Docker shuts down.
+    const timedOut = error.killed && error.code == null;
     const details = [timedOut ? `timed out after ${timeout / 1000}s` : 'command failed',
       `exit=${error.code ?? 'none'}`, `signal=${error.signal ?? 'none'}`, `killed=${Boolean(error.killed)}`];
     const operation = args.includes('version') ? 'version' : args.slice(0, 2).filter(a => /^[a-z-]+$/.test(a)).join(' ');
