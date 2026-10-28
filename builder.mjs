@@ -205,11 +205,14 @@ export async function setup(env = process.env, run = command, wait = delay) {
   // the remote session. Retry this read only; never replay a build or push.
   // The control-plane wake is complete. Bound each native probe separately
   // so a stale connection cannot consume the entire readiness deadline.
+  // Docker negotiates its API with a ping before requesting the version. Each
+  // request establishes an authenticated tunnel; allow both to finish under
+  // load without restarting the shared 90-second readiness budget.
   const readinessDeadline = Date.now() + 90_000;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const version = await run('docker', ['--context', context, 'version', '--format', '{{.Server.Version}}'], dockerEnv,
-        Math.max(1, Math.min(15_000, readinessDeadline - Date.now())));
+        Math.max(1, Math.min(45_000, readinessDeadline - Date.now())));
       if (!/^\d+\.\d+\.\d+/.test(version.trim())) throw new Error('Remote Docker daemon is not ready');
       break;
     } catch (error) {

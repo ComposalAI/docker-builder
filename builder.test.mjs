@@ -371,7 +371,7 @@ test('a stalled native connection uses one readiness budget and cannot restart t
     return f.run(exe, args, env, timeout);
   };
   await assert.rejects(setup(f.env, run, async ms => waits.push(ms)), /connection reset/);
-  assert.deepEqual(timeouts, [15_000]);
+  assert.deepEqual(timeouts, [45_000]);
   assert.deepEqual(waits, []);
   await assert.rejects(readFile(f.env.GITHUB_OUTPUT), { code: 'ENOENT' });
 });
@@ -389,7 +389,7 @@ test('a long shared wake completes before opening short-lived Docker probes', as
     } });
     if (args.includes('version')) {
       assert.equal(now, 760_000);
-      assert.equal(timeout, 15_000);
+      assert.equal(timeout, 45_000);
     }
     return result;
   };
@@ -407,6 +407,28 @@ test('native probe timeouts are retried without repeating setup or a build', asy
   await setup(f.env, run, async () => {});
   assert.equal(probes, 2);
   assert.equal(f.calls.filter(c => c.args[1] === 'setup').length, 1);
+});
+
+test('slow native negotiation can finish and retries share the remaining readiness budget', async t => {
+  const f = await fixture(t);
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const timeouts = [];
+  const run = async (exe, args, env, timeout) => {
+    if (args.includes('version')) {
+      timeouts.push(timeout);
+      if (timeouts.length === 1) {
+        now += timeout;
+        throw new Error('timed out after 45s');
+      }
+      // A healthy negotiation may take longer than the former 15s limit.
+      now += 25_000;
+    }
+    return f.run(exe, args, env, timeout);
+  };
+  await setup(f.env, run, async ms => { now += ms; });
+  assert.deepEqual(timeouts, [45_000, 43_000]);
+  assert.ok((await readFile(f.env.GITHUB_OUTPUT, 'utf8')).includes('driver<<'));
 });
 
 test('command failures preserve timeout and signal details without stdout or environment', async () => {
